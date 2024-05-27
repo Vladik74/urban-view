@@ -1,6 +1,6 @@
 import React, { Dispatch, SetStateAction } from "react";
 import styles from "./filter-form.module.css";
-import { OptionType } from "./map";
+import { OptionType } from "../map/map";
 
 // type OptionType = 'parks' | 'schools' | 'health' | null;
 type FilterFormTypeProps = {

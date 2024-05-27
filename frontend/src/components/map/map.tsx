@@ -3,9 +3,9 @@ import { MapContainer, TileLayer, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet.heat";
 import "leaflet/dist/leaflet.css";
-import FilterForm from "./filter-form";
+import FilterForm from "../filter-form/filter-form";
 import styles from "./map.module.css";
-import { OSMGeometry, OsmObj } from "./osm-obj";
+import { OSMGeometry, OsmObj } from "../osm-obj";
 import { point, bbox, booleanPointInPolygon, lineString, bboxPolygon, getCoord, area } from "@turf/turf";
 
 
@@ -15,6 +15,7 @@ type HeatLatLngTuple = [number, number, number];
 export type OptionType = "parks" | "schools" | "health" | "eat" | "industrial" | "kindergarten";
 // type JSONOsmObj = { elements: OsmObj[] };
 const areas: [] = [];
+const MAX_DATA_TTL = 120000;
 
 const Heatmap = ({ data }: { data: HeatLatLngTuple[] }) => {
   const map = useMap();
@@ -96,18 +97,16 @@ export const Map = () => {
     [out:json];
     area[name="Екатеринбург"]->.searchArea;
     (
-    node["leisure"="park"](area.searchArea);
-    way["leisure"="park"](area.searchArea);
-    relation["leisure"="park"](area.searchArea);
-    node["leisure"="nature_reserve"](area.searchArea);
-    way["leisure"="nature_reserve"](area.searchArea);
-    relation["leisure"="nature_reserve"](area.searchArea);
-    way["highway"="pedestrian"](area.searchArea);
-    way["area"="yes"]["highway"="pedestrian"](area.searchArea);
+      node["leisure"="park"](area.searchArea);
+      way["leisure"="park"](area.searchArea);
+      relation["leisure"="park"](area.searchArea);
+      node["leisure"="nature_reserve"](area.searchArea);
+      way["leisure"="nature_reserve"](area.searchArea);
+      relation["leisure"="nature_reserve"](area.searchArea);
+      way["highway"="pedestrian"](area.searchArea);
+      way["area"="yes"]["highway"="pedestrian"](area.searchArea);
     );
-    out body;
-    >;
-out skel qt;
+    out geom;
     `,
     health: `
     [out:json];
@@ -157,6 +156,17 @@ out skel qt;
     relation["landuse"="quarry"](area.searchArea);
     );
     out geom;
+    `,
+    kindergarten:
+    `
+    [out:json];
+    area[name="Екатеринбург"]->.searchArea;
+    (
+      node["amenity"="kindergarten"]["name"~"№"](area.searchArea);
+      way["amenity"="kindergarten"]["name"~"№"](area.searchArea);
+      relation["amenity"="kindergarten"]["name"~"№"](area.searchArea);
+    );
+    out center;    
     `
   }
 
@@ -173,7 +183,7 @@ out skel qt;
               }
               return response.json();
         });
-        setLocalStorageItem('schools', data, 60000);
+        setLocalStorageItem('schools', data, MAX_DATA_TTL);
     }
 
     const elements: Array<OsmObj> = data.elements;
@@ -201,13 +211,13 @@ out skel qt;
           }
           return response.json();
         });
-        setLocalStorageItem('parks', data, 60000);
+        setLocalStorageItem('parks', data, MAX_DATA_TTL);
     }
 
     const elements: Array<OsmObj> = data.elements;
     const filteredElements = elements.filter((element) => element.tags);
     // console.log(filteredElements);
-    return parkOptionHandler(filteredElements, 2);
+    return parkOptionHandler(filteredElements, 0.2);
     // return countOptionHandler(filteredElements, 15);
   };
 
@@ -224,7 +234,7 @@ out skel qt;
               }
               return response.json();
         });
-        setLocalStorageItem('health', data, 60000);
+        setLocalStorageItem('health', data, MAX_DATA_TTL);
     }
     
     const elements: Array<OsmObj> = data.elements;
@@ -232,7 +242,7 @@ out skel qt;
       (element) =>
         element.tags && element.tags.name && element.tags.name.includes("№")
     );
-    return countOptionHandler(filteredElements, 5);
+    return countOptionHandler(filteredElements, 10);
   };
 
   const eatHandler = async () => {
@@ -248,7 +258,7 @@ out skel qt;
               }
               return response.json();
         });
-        setLocalStorageItem('eat', data, 60000);
+        setLocalStorageItem('eat', data, MAX_DATA_TTL);
     }
     const elements: Array<OsmObj> = data.elements;
     const filteredElements = elements.filter(
@@ -273,12 +283,38 @@ out skel qt;
               }
               return response.json();
         });
-        setLocalStorageItem('industrial', data, 60000);
+        setLocalStorageItem('industrial', data, MAX_DATA_TTL);
     }
     const elements: Array<OsmObj> = data.elements;
     const filteredElements = elements.filter((element) => element.tags);
     // console.log(filteredElements);
     return parkOptionHandler(filteredElements, -5);
+  }
+
+  const kindergartenHandler = async () => {
+    const kindergartenLocalStorageData = getLocalStorageItem('kindergarten');
+    let data = kindergartenLocalStorageData;
+    if (!kindergartenLocalStorageData) {
+        const kindergartenPath = `${basePath}${encodeURIComponent(optionPaths['kindergarten'])}`;
+        data = await fetch(kindergartenPath).then((response) => {
+            if (!response.ok) {
+                throw new Error(
+                  "Network response was not ok " + response.statusText
+                );
+              }
+              return response.json();
+        });
+        setLocalStorageItem('kindergarten', data, MAX_DATA_TTL);
+    }
+    const elements: Array<OsmObj> = data.elements;
+    const filteredElements = elements.filter(
+      (element) => element.tags && element.tags.name
+    );
+    const generatedKindergartenPoints = generateSchoolPointsbyArchimedes(filteredElements, 200, 400);
+    console.log(generatedKindergartenPoints);
+    const unionElements = filteredElements.concat(generatedKindergartenPoints);
+    console.log(unionElements);
+    return countOptionHandler(unionElements, 3);
   }
 
 //   const generateSchoolPoints = (elements: OsmObj[], n: number, radius: number): OsmObj[] => {
@@ -340,6 +376,7 @@ out skel qt;
 
   const parkOptionHandler = (data: OsmObj[], k: number): HeatLatLngTuple[] => {
     const coords = [];
+    console.log(data);
     for (let i = 0; i < data.length; i++) {
       const currentObj = data[i];
       if (currentObj.center) {
@@ -383,7 +420,7 @@ out skel qt;
         coords.push([currentObj.lat, currentObj.lon, k]);
       }
     }
-    // console.log(coords);
+    console.log(coords);
     return coords;
   };
 
@@ -426,6 +463,9 @@ out skel qt;
           if (option === "industrial") {
             industrialHandler().then((data) => setHeatmapData((prev) => [...prev, ...data]));
           }
+          if (option === "kindergarten") {
+            kindergartenHandler().then((data) => setHeatmapData((prev) => [...prev, ...data]));
+          }
         })
   }, [selectedOptions]);
 
@@ -460,7 +500,7 @@ out skel qt;
         center={[56.85, 60.61]}
         zoom={13}
         scrollWheelZoom={false}
-        style={{ height: "720px", width: "720px" }}
+        style={{ height: "900px", width: "900px" }}
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
