@@ -1,5 +1,6 @@
 BUCKET_NAME="urban-view"
 
+
 npm ci
 npm version patch
 npm run build

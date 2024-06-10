@@ -1,0 +1,9 @@
+.filterLabel {
+    width: 150px;
+    text-align: left;
+}
+
+.filterRoot {
+    display: flex;
+    gap: 16px;
+}

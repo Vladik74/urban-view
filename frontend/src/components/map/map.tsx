@@ -7,21 +7,25 @@ import FilterForm from "../filter-form/filter-form";
 import styles from "./map.module.css";
 import { OSMGeometry, OsmObj } from "../osm-obj";
 import { point, bbox, booleanPointInPolygon, lineString, bboxPolygon, getCoord, area } from "@turf/turf";
+import Loader from "../loader/loader";
 
 
 
 
 type HeatLatLngTuple = [number, number, number];
-export type OptionType = "parks" | "schools" | "health" | "eat" | "industrial" | "kindergarten";
+type LatLngDistTuple = [number, number, number];
+export type OptionType = "parks" | "schools" | "health" | "eat" | "industrial" | "kindergarten" | "transport_steps";
 // type JSONOsmObj = { elements: OsmObj[] };
 const areas: [] = [];
 const MAX_DATA_TTL = 120000;
+const CENTER_COORDS = "56.837333,60.595438";
+const INTENSITY = 0.05;
 
 const Heatmap = ({ data }: { data: HeatLatLngTuple[] }) => {
   const map = useMap();
 
   useEffect(() => {
-    const heatLayer = L.heatLayer(data, { radius: 60, blur: 90, maxZoom: 18 });
+    const heatLayer = L.heatLayer(data, { radius: 60, blur: 98, maxZoom: 18 });
     heatLayer.addTo(map);
 
     // Cleanup on unmount
@@ -35,12 +39,14 @@ const Heatmap = ({ data }: { data: HeatLatLngTuple[] }) => {
 
 function calculatePointCount(x: number) {
     const maxInput = 30000000; // Максимальное значение x
-    const maxValue = 400; // Значение функции при x = maxInput
-    return Math.round((maxValue / Math.log(maxInput + 1)) * Math.log(x + 1));
+    const maxValue = 1000; // Значение функции при x = maxInput
+    const count = Math.round((maxValue / Math.log(maxInput + 1)) * Math.log(x + 1));
+    console.log(count);
+    return count;
   }
 
-function generatePointsInPolygon(osmPolygon: OSMGeometry[], k: number) {
-    const points = [];
+function generatePointsInPolygon(osmPolygon: OSMGeometry[], intensity: number): HeatLatLngTuple[] {
+    const points: HeatLatLngTuple[] = [];
     const restrictionBoxInput = [];
     osmPolygon.forEach((geom) => restrictionBoxInput.push([geom.lat, geom.lon]))
     // console.log(restrictionBoxInput);
@@ -60,7 +66,7 @@ function generatePointsInPolygon(osmPolygon: OSMGeometry[], k: number) {
         
        
         if (booleanPointInPolygon(currentPoint, bboxPolygon(restrictionBox))) {
-            points.push([...getCoord(currentPoint), k]);
+            points.push([...getCoord(currentPoint), intensity]);
         }
         areas.push([area(bboxPolygon(restrictionBox)), restrictionBox[0], restrictionBox[1], restrictionBox[2], restrictionBox[3], numPoints]);
         // console.log(points);
@@ -69,9 +75,63 @@ function generatePointsInPolygon(osmPolygon: OSMGeometry[], k: number) {
     return points;
 }
 
+function isPointInsidePolygon(polygon: OSMGeometry[], point: OSMGeometry): boolean {
+  let isInside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].lon, yi = polygon[i].lat;
+      const xj = polygon[j].lon, yj = polygon[j].lat;
+
+      const intersect = ((yi > point.lat) !== (yj > point.lat)) &&
+          (point.lon < (xj - xi) * (point.lat - yi) / (yj - yi) + xi);
+      if (intersect) isInside = !isInside;
+  }
+  return isInside;
+}
+
+function generatePointsOutsidePolygon(polygon: OSMGeometry[], k: number, m: number, n: number, intensity: number): HeatLatLngTuple[] {
+  const generatedPoints: HeatLatLngTuple[] = [];
+
+  function getRandomPointNear(p: OSMGeometry, minDistance: number, maxDistance: number): OSMGeometry {
+      const angle = Math.random() * 2 * Math.PI;
+      const distance = minDistance + Math.random() * (maxDistance - minDistance);
+      const earthRadius = 6371e3; // радиус Земли в метрах
+
+      const newLat = p.lat + (distance / earthRadius) * (180 / Math.PI) * Math.sin(angle);
+      const newLon = p.lon + (distance / earthRadius) * (180 / Math.PI) * Math.cos(angle) / Math.cos(p.lat * Math.PI / 180);
+
+      return {
+          lat: newLat,
+          lon: newLon
+      };
+  }
+
+  for (const point of polygon) {
+      let pointsGenerated = 0;
+      while (pointsGenerated < k) {
+          const newPoint = getRandomPointNear(point, m, n);
+          if (!isPointInsidePolygon(polygon, newPoint)) {
+              generatedPoints.push([newPoint.lat, newPoint.lon, intensity]);
+              pointsGenerated++;
+          }
+      }
+  }
+
+  return generatedPoints;
+}
+
 export const Map = () => {
   const [heatmapData, setHeatmapData] = useState<HeatLatLngTuple[]>([]);
   const [selectedOptions, setSelectedOptions] = useState<OptionType[]>([]);
+  const [selectedOptionsWeight, setSelectedOptionsWeight] = useState<Record<OptionType, number>>({
+    parks: 1,
+    schools: 1,
+    health: 1,
+    eat: 1,
+    industrial: 1,
+    kindergarten: 1,
+    transport_steps: 1,
+  });
+  const [loading, setLoading] = useState<boolean>(true);
 //   const optionFiles: Record<string, string> = {
 //     schools: "schools.json",
 //     parks: "parks2.json",
@@ -167,6 +227,16 @@ export const Map = () => {
       relation["amenity"="kindergarten"]["name"~"№"](area.searchArea);
     );
     out center;    
+    `,
+    transport_steps:
+    `
+    [out:json];
+    area[name="Екатеринбург"]->.searchArea;
+      (
+      node["public_transport"="stop_position"](area.searchArea)["bench"!="yes"];
+      node["railway"="tram_stop"](area.searchArea)["bench"!="yes"];
+      );
+    out center;
     `
   }
 
@@ -191,11 +261,12 @@ export const Map = () => {
       (element) =>
         element.tags && element.tags.name && element.tags.name.includes("№")
     );
-    const generatedSchoolPoints = generateSchoolPointsbyArchimedes(filteredElements, 300, 800);
+    const generatedSchoolPoints = generatePointsbyArchimedes(filteredElements, 300, 800);
     console.log(generatedSchoolPoints);
     const unionElements = filteredElements.concat(generatedSchoolPoints);
     console.log(unionElements);
-    return countOptionHandler(unionElements, 5);
+    console.log(selectedOptionsWeight.schools);
+    return countOptionHandler(unionElements, INTENSITY * selectedOptionsWeight.schools);
   };
 
   const parksHandler = async () => {
@@ -217,7 +288,7 @@ export const Map = () => {
     const elements: Array<OsmObj> = data.elements;
     const filteredElements = elements.filter((element) => element.tags);
     // console.log(filteredElements);
-    return parkOptionHandler(filteredElements, 0.2);
+    return parkOptionHandler(filteredElements, INTENSITY * selectedOptionsWeight.parks);
     // return countOptionHandler(filteredElements, 15);
   };
 
@@ -242,7 +313,7 @@ export const Map = () => {
       (element) =>
         element.tags && element.tags.name && element.tags.name.includes("№")
     );
-    return countOptionHandler(filteredElements, 10);
+    return countOptionHandler(filteredElements, INTENSITY * selectedOptionsWeight.health);
   };
 
   const eatHandler = async () => {
@@ -267,7 +338,7 @@ export const Map = () => {
     // console.log(countOptionHandler(filteredElements, 3));
     // console.log(greatCircle([0, 0], [100, 10]));
     // console.log(point([100, 0]));
-    return countOptionHandler(filteredElements, 1.5);
+    return countOptionHandler(filteredElements, INTENSITY * selectedOptionsWeight.eat);
   };
   
   const industrialHandler = async () => {
@@ -288,7 +359,7 @@ export const Map = () => {
     const elements: Array<OsmObj> = data.elements;
     const filteredElements = elements.filter((element) => element.tags);
     // console.log(filteredElements);
-    return parkOptionHandler(filteredElements, -5);
+    return parkOptionHandler(filteredElements, INTENSITY * (-selectedOptionsWeight.industrial));
   }
 
   const kindergartenHandler = async () => {
@@ -310,11 +381,65 @@ export const Map = () => {
     const filteredElements = elements.filter(
       (element) => element.tags && element.tags.name
     );
-    const generatedKindergartenPoints = generateSchoolPointsbyArchimedes(filteredElements, 200, 400);
+    const generatedKindergartenPoints = generatePointsbyArchimedes(filteredElements, 200, 400);
     console.log(generatedKindergartenPoints);
     const unionElements = filteredElements.concat(generatedKindergartenPoints);
     console.log(unionElements);
-    return countOptionHandler(unionElements, 3);
+    return countOptionHandler(unionElements, INTENSITY * selectedOptionsWeight.kindergarten);
+  }
+
+  const transportStepsHandler = async () => {
+    const transportStepsLocalStorageData = getLocalStorageItem('transport_steps');
+    let data = transportStepsLocalStorageData;
+    if (!transportStepsLocalStorageData) {
+        const transportStepsPath = `${basePath}${encodeURIComponent(optionPaths['transport_steps'])}`;
+        data = await fetch(transportStepsPath).then((response) => {
+            if (!response.ok) {
+                throw new Error(
+                  "Network response was not ok " + response.statusText
+                );
+              }
+              return response.json();
+        });
+        setLocalStorageItem('transport_steps', data, MAX_DATA_TTL);
+    }
+    
+    // const elements: Array<OsmObj> = data.elements;
+    const elements: Array<OsmObj> = [];
+    console.log(elements);
+    const filteredElements = elements.filter(
+      (element) => element.tags);
+    const stepsDistances: LatLngDistTuple[] = [];
+    const routeUrl = `https://bbauils3a53ff0lrjhvc.containers.yandexcloud.net/get_distances`;
+    const routeResponse = await fetch(routeUrl).then((response) => {
+      if (!response.ok) {
+        throw new Error(
+          "Network response was not ok " + response.statusText
+        );
+       }
+      return response.json();
+    });
+    console.log(routeResponse);
+    for (let i=0; i<routeResponse.length; i++) {
+      stepsDistances.push([routeResponse[i].lat, routeResponse[i].lon, routeResponse[i].dist / INTENSITY * selectedOptionsWeight.transport_steps]);
+    }
+
+    // for (let i=0; i<50; i++) {
+    //   const stepCoords = `${filteredElements[i].lat},${filteredElements[i].lon}`;
+    //   const routeUrl = `https://router.project-osrm.org/route/v1/driving/${stepCoords};${CENTER_COORDS}?overview=false`;
+    //   console.log(routeUrl);
+    //   const routeResponse = await fetch(routeUrl).then((response) => {
+    //     if (!response.ok) {
+    //       throw new Error(
+    //         "Network response was not ok " + response.statusText
+    //       );
+    //     }
+    //     return response.json();
+    //   });
+  
+    console.log(stepsDistances);
+    return countDistHandler(stepsDistances);
+    // return countOptionHandler(filteredElements, 5);
   }
 
 //   const generateSchoolPoints = (elements: OsmObj[], n: number, radius: number): OsmObj[] => {
@@ -345,7 +470,7 @@ export const Map = () => {
 //         return randomSchoolPoints;
 //   }
 
-  const generateSchoolPointsbyArchimedes = (elements: OsmObj[], n: number, radius: number): OsmObj[] => {
+  const generatePointsbyArchimedes = (elements: OsmObj[], n: number, radius: number): OsmObj[] => {
     const randomSchoolPoints: OsmObj[] = [];
     const a = 10;
     for (let i=0; i<elements.length; i++) {
@@ -375,7 +500,7 @@ export const Map = () => {
   }
 
   const parkOptionHandler = (data: OsmObj[], k: number): HeatLatLngTuple[] => {
-    const coords = [];
+    const coords: HeatLatLngTuple[] = [];
     console.log(data);
     for (let i = 0; i < data.length; i++) {
       const currentObj = data[i];
@@ -385,7 +510,10 @@ export const Map = () => {
       }
       if (currentObj.geometry) {
         const geometryLength = currentObj.geometry.length;
-        const generatedPoints = generatePointsInPolygon(currentObj.geometry, k);
+        const generatedInsidePoints = generatePointsInPolygon(currentObj.geometry, k);
+        const generatedOutsidePoints = generatePointsOutsidePolygon(currentObj.geometry, 50, 50, 500, k / 2);
+        console.log(generatedInsidePoints.length, generatePointsOutsidePolygon.length);
+        const unionPoints = generatedInsidePoints.concat(generatedOutsidePoints);
         // console.log(generatedPoints);
         for (let nodeIndex = 0; nodeIndex < geometryLength; nodeIndex++) {
           const lat = currentObj.geometry[nodeIndex].lat;
@@ -393,7 +521,7 @@ export const Map = () => {
         //   console.log([lat, lon, k]);
           lat !== undefined && lon !== undefined && coords.push([lat, lon, k]);
         }
-        generatedPoints.forEach((point) => {
+        unionPoints.forEach((point) => {
             // console.log(point);
             coords.push(point)});
       }
@@ -425,8 +553,6 @@ export const Map = () => {
   };
 
   const countOptionHandler = (data: OsmObj[], k: number) => {
-    // count 1 / len(checked_options)
-    // const coef = 5;
     return data.map((element): HeatLatLngTuple => {
       if (element.center) {
         return [element.center.lat, element.center.lon, k];
@@ -437,6 +563,14 @@ export const Map = () => {
       //     })
       //   }
       return [element.lat, element.lon, k];
+    });
+  };
+
+  const countDistHandler = (data: LatLngDistTuple[]) => {
+    return data.map((element): LatLngDistTuple => {
+      const result: LatLngDistTuple = [element[0], element[1], 1 / element[2] * 10000000];
+      console.log(result);
+      return result;
     });
   };
 
@@ -466,8 +600,12 @@ export const Map = () => {
           if (option === "kindergarten") {
             kindergartenHandler().then((data) => setHeatmapData((prev) => [...prev, ...data]));
           }
+          if (option === "transport_steps") {
+            transportStepsHandler().then((data) => setHeatmapData((prev) => [...prev, ...data]));
+          }
         })
-  }, [selectedOptions]);
+    setLoading(false);
+  }, [selectedOptions, selectedOptionsWeight]);
 
   const getLocalStorageItem = (key: OptionType)  => {
     const localStorageItemStr = localStorage.getItem(key);
@@ -508,11 +646,14 @@ export const Map = () => {
           minZoom={12}
           maxZoom={18}
         />
-        {heatmapData && <Heatmap data={heatmapData} />}
+        {loading ? <Loader /> : <Heatmap data={heatmapData} />}
+        {/* {heatmapData && <Heatmap data={heatmapData} />} */}
       </MapContainer>
       <FilterForm
         selectedOptions={selectedOptions}
         setSelectedOptions={setSelectedOptions}
+        selectedOptionsWeight={selectedOptionsWeight}
+        setSelectedOptionsWeight={setSelectedOptionsWeight}
       ></FilterForm>
     </div>
   );

@@ -3,4 +3,6 @@
     justify-content: flex-start;
     flex-direction: column;
     padding: 15px;
+    align-items: start;
+    gap: 8px;
 }
